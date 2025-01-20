@@ -3,47 +3,47 @@ package handler
 import (
 	"archiv-system/internal/database"
 	"archiv-system/internal/models"
+	"archiv-system/internal/utils"
 	"github.com/gin-gonic/gin"
 	"net/http"
 	"time"
 )
 
-// AdminHandler Logic
 func AdminHandler(c *gin.Context) {
-	// initialize the statistics
+	// Initialisation des statistiques
 	var totalUsers int64
 	var totalAdmins int64
 	var totalDocuments int64
 	var activeUsers int64
 
-	// Get all users
+	// Obtenir tous les utilisateurs
 	if err := database.DB.Model(&models.User{}).Count(&totalUsers).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user statistics"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to fetch user statistics", nil)
 		return
 	}
 
-	// Get all admins
+	// Obtenir tous les admins
 	if err := database.DB.Model(&models.User{}).Where("role = ?", "admin").Count(&totalAdmins).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch admin statistics"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to fetch admin statistics", nil)
 		return
 	}
 
-	// fetch all docs in the database
+	// Obtenir tous les documents dans la base de données
 	if err := database.DB.Model(&models.Document{}).Count(&totalDocuments).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch document statistics"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to fetch document statistics", nil)
 		return
 	}
 
-	// fetch all actifs users (for example, users who download documents during the last 30 days)
+	// Obtenir les utilisateurs actifs (ex. utilisateurs ayant téléchargé des documents au cours des 30 derniers jours)
 	if err := database.DB.Model(&models.Document{}).
 		Where("created_at >= ?", time.Now().AddDate(0, 0, -30)).
 		Distinct("user_id").
 		Count(&activeUsers).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch active user statistics"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to fetch active user statistics", nil)
 		return
 	}
 
-	// fetch documents by user
+	// Obtenir les documents par utilisateur
 	var userDocsCount []struct {
 		UserID   uint   `json:"user_id"`
 		Username string `json:"username"`
@@ -56,19 +56,16 @@ func AdminHandler(c *gin.Context) {
 		Order("doc_count DESC").
 		Limit(10).
 		Scan(&userDocsCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch documents by user"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to fetch documents by user", nil)
 		return
 	}
 
-	// Return statistics
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Welcome to the Admin Dashboard",
-		"stats": gin.H{
-			"total_users":     totalUsers,
-			"total_admins":    totalAdmins,
-			"total_documents": totalDocuments,
-			"active_users":    activeUsers,
-		},
+	// Retourner les statistiques
+	utils.RespondJSON(c, http.StatusOK, "Welcome to the Admin Dashboard", gin.H{
+		"total_users":         totalUsers,
+		"total_admins":        totalAdmins,
+		"total_documents":     totalDocuments,
+		"active_users":        activeUsers,
 		"user_document_stats": userDocsCount,
 	})
 }
@@ -78,12 +75,9 @@ func UserHandler(c *gin.Context) {
 	userID := c.GetString("userID")
 	username := c.GetString("username")
 
-	// Return statistics
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Welcome to the User Dashboard",
-		"user": gin.H{
-			"id":       userID,
-			"username": username,
-		},
+	// Retourner les informations utilisateur
+	utils.RespondJSON(c, http.StatusOK, "Welcome to the User Dashboard", gin.H{
+		"id":       userID,
+		"username": username,
 	})
 }

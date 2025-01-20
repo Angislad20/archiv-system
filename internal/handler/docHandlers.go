@@ -3,127 +3,180 @@ package handler
 import (
 	"archiv-system/internal/database"
 	"archiv-system/internal/models"
+	"archiv-system/internal/services"
 	"archiv-system/internal/utils"
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
-// UploadFile Logic
+// UploadFile handles the uploading of documents
 func UploadFile(c *gin.Context) {
+	// Récupérer l'ID de l'utilisateur
+	userID, exists := c.Get("userID")
+	if !exists {
+		utils.RespondError(c, http.StatusUnauthorized, "User ID not found in context", nil)
+		return
+	}
+
+	userIDUint, ok := userID.(uint)
+	if !ok {
+		utils.RespondError(c, http.StatusInternalServerError, "Invalid User ID type", nil)
+		return
+	}
+
+	// Récupérer le fichier de la requête
 	file, err := c.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to upload file"})
+		utils.RespondError(c, http.StatusBadRequest, "Failed to get file", err.Error())
 		return
 	}
 
-	// Validate file format
-	if !strings.HasSuffix(file.Filename, ".pdf") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Only PDF files are allowed"})
+	// Construire un objet représentant le fichier
+	uploadedFile := &models.UploadedFile{
+		Filename:    file.Filename,
+		ContentType: file.Header.Get("Content-Type"),
+		Save: func(destination string) error {
+			return c.SaveUploadedFile(file, destination)
+		},
+	}
+
+	// Récupérer les tags de la requête
+	tags := c.PostForm("tags")
+
+	// Appeler la logique métier
+	input := services.UploadFileInput{
+		UserID: userIDUint,
+		File:   uploadedFile,
+		Tags:   &models.Tag{Name: tags},
+	}
+
+	document, err := services.ProcessFileUpload(input)
+	if err != nil {
+		utils.RespondError(c, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 
-	// Define destination and save the file
-	destination := "uploads/" + file.Filename
-	if err := c.SaveUploadedFile(file, destination); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file"})
-		return
-	}
-
-	// Create document entry in the database
-	document := models.Document{
-		Name: file.Filename,
-		Type: "pdf",
-		URL:  destination,
-		Tags: "", // Logic for tags can be added later
-	}
-	if err := database.DB.Create(&document).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save document in database"})
-		return
-	}
-
-	// Respond with success
-	c.JSON(http.StatusCreated, gin.H{"message": "File uploaded successfully", "document": document})
+	// Répondre avec succès
+	utils.RespondJSON(c, http.StatusOK, "File uploaded successfully", gin.H{
+		"ID":        document.ID,
+		"Name":      document.Name,
+		"Type":      document.Type,
+		"URL":       document.URL,
+		"Tags":      document.Tags,
+		"CreatedAt": document.CreatedAt,
+		"UpdatedAt": document.UpdatedAt,
+	})
 }
 
+// ViewListDoc handles the retrieval of all documents
 func ViewListDoc(c *gin.Context) {
 	var documents []models.Document
 	if database.DB.Find(&documents).Error != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to fetch documents"})
+		utils.RespondError(c, http.StatusBadRequest, "Failed to fetch documents", gin.H{"error": "Failed to fetch documents"})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"documents": documents})
+	utils.RespondJSON(c, http.StatusCreated, "Documents fetched successfully", gin.H{"documents": documents})
 }
 
+// UpdateDocument handles the updating of a document
 func UpdateDocument(c *gin.Context) {
-	var document models.Document
 	docID := c.Param("id")
-	if err := database.DB.First(&document, docID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Document not found"})
+	//valider les entrées
+	var updateRequest models.UpdateRequest
+	if err := c.BindJSON(&updateRequest); err != nil {
+		utils.RespondError(c, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
 
-	if err := c.BindJSON(&document); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	// Appeler la logique métier
+	documentService := &services.DocumentService{}
+	updateDocument, err := documentService.ProcessFileUpdate(docID, updateRequest)
+	if err != nil {
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to update document", err.Error())
 		return
 	}
 
-	if err := database.DB.Save(&document).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update document"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Document updated successfully"})
+	utils.RespondJSON(c, http.StatusOK, "Document updated successfully", gin.H{"document": updateDocument})
 }
 
+// GetUserDocuments handles the retrieval of documents for a specific user
 func GetUserDocuments(c *gin.Context) {
-	userID := c.GetUint("UserID") // Récupère l'ID de l'utilisateur connecté depuis le contexte
+	userID := c.GetUint("UserID") // Retrieve the user ID from the context
 
 	documents, err := utils.GetDocumentsByOwnerID(database.DB, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch documents"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to fetch documents", err.Error())
+		return
+	}
+	utils.RespondJSON(c, http.StatusOK, "Documents fetched successfully", gin.H{"documents": documents})
+}
+
+// GetDocumentsByTags handles the retrieval of documents by tags
+func GetDocumentsByTags(c *gin.Context) {
+	tags := c.DefaultQuery("tags", "") // Retrieve tags from the query (comma-separated)
+
+	if tags == "" {
+		utils.RespondError(c, http.StatusBadRequest, "Tags query parameter is required", nil)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"documents": documents})
+	tagNames := strings.Split(tags, ",")
+	var documents []models.Document
+
+	// Search for documents associated with the given tags
+	if err := database.DB.Preload("Tags").Joins("JOIN document_tags ON document_tags.document_id = documents.id").
+		Joins("JOIN tags ON tags.id = document_tags.tag_id").
+		Where("tags.name IN (?)", tagNames).
+		Find(&documents).Error; err != nil {
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to find documents by tags", err.Error())
+		return
+	}
+
+	// Respond with the found documents
+	utils.RespondJSON(c, http.StatusOK, "Documents retrieved successfully", gin.H{
+		"documents": documents,
+	})
 }
 
+// DeleteDocument handles the deletion of a document
 func DeleteDocument(c *gin.Context) {
 	docID := c.Param("id")
 
 	var document models.Document
 	if err := database.DB.First(&document, docID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Document not found"})
+		utils.RespondError(c, http.StatusNotFound, "Document not found", gin.H{"error": "Document not found"})
 		return
 	}
 
 	if err := database.DB.Delete(&document).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete document"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to delete document", err.Error())
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Document deleted successfully"})
+	utils.RespondJSON(c, http.StatusOK, "Document deleted successfully", gin.H{"document": document})
 }
 
+// CheckDocumentUpdate checks if a document has been updated since it was last viewed
 func CheckDocumentUpdate(c *gin.Context) {
 	docID := c.Param("id")
 	lastViewedTimeStr := c.GetHeader("LastViewed")
 	lastViewedTime, err := time.Parse(time.RFC3339, lastViewedTimeStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid timestamp"})
+		utils.RespondError(c, http.StatusBadRequest, "Invalid timestamp", err.Error())
 		return
 	}
 
 	updatedAt, err := utils.GetDocumentUpdatedAt(docID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not check update status"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to check update status", err.Error())
 		return
 	}
 
 	if updatedAt.After(lastViewedTime) {
-		c.JSON(http.StatusOK, gin.H{"update_available": true})
+		utils.RespondJSON(c, http.StatusOK, "Document updated", gin.H{"update_available": true})
 	} else {
-		c.JSON(http.StatusOK, gin.H{"update_available": false})
+		utils.RespondJSON(c, http.StatusOK, "Document not updated", gin.H{"update_available": false})
 	}
 }

@@ -4,8 +4,9 @@ import (
 	"archiv-system/internal/database"
 	"archiv-system/internal/models"
 	"errors"
-	"gorm.io/gorm"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func GetDocumentsByOwnerID(db *gorm.DB, ownerID uint) ([]models.Document, error) {

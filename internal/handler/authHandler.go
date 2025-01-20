@@ -4,73 +4,93 @@ import (
 	"archiv-system/internal/database"
 	"archiv-system/internal/models"
 	"archiv-system/internal/utils"
-	"fmt"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"log"
 	"net/http"
 )
 
+// Register permet de créer un nouvel utilisateur
 func Register(c *gin.Context) {
-	var user models.User
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
 
-	// Action to create user
-	if err := c.ShouldBindJSON(&user); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
+	// Récupération des données d'entrée
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.RespondError(c, http.StatusBadRequest, "Invalid input data", err.Error())
 		return
 	}
 
-	if database.DB.Create(&user).Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
+	// Vérifier si le rôle "user" existe
+	var role models.Role
+	if err := database.DB.Where("name = ?", "user").First(&role).Error; err != nil {
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to fetch default role", err.Error())
+		log.Printf("Error fetching role 'user': %v", err)
 		return
 	}
 
-	// action to hash password
-	hashpassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	// Hacher le mot de passe
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to hash password", err.Error())
 		return
 	}
-	user.Password = string(hashpassword)
 
-	// Respond with success
-	c.JSON(http.StatusCreated, gin.H{"message": "User created successfully"})
+	// Créer l'utilisateur
+	user := models.User{
+		Username: req.Username,
+		Password: string(hashedPassword),
+		RoleID:   role.ID, // Associer l'utilisateur au rôle "user"
+	}
+
+	// Enregistrer l'utilisateur dans la base de données
+	if err := database.DB.Create(&user).Error; err != nil {
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to create user", err.Error())
+		return
+	}
+
+	// Répondre avec succès
+	utils.RespondJSON(c, http.StatusCreated, "User created successfully", gin.H{
+		"id":       user.ID,
+		"username": user.Username,
+	})
 }
 
+// Login permet à un utilisateur de se connecter
 func Login(c *gin.Context) {
-	var userLogin struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
 	}
 
-	if err := c.ShouldBindJSON(&userLogin); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-		fmt.Println("Error in binding JSON:", err)
+	// Récupération des données d'entrée
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.RespondError(c, http.StatusBadRequest, "Invalid input data", err.Error())
 		return
 	}
 
-	fmt.Println("Received login request:", userLogin) // Log for debugging
-
-	// Search user in the database
+	// Recherche de l'utilisateur dans la base de données
 	var user models.User
-	if err := database.DB.Where("username = ?", userLogin.Username).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Error fetching user"})
+	if err := database.DB.Preload("Role").Where("username = ?", req.Username).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"message": "Invalid username or password"})
 		return
 	}
 
-	// Compare passwords
-	if err := utils.ComparePassword(userLogin.Password, user.Password); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Password incorrect"})
+	// Vérification du mot de passe
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"message": "Invalid username or password"})
 		return
 	}
 
-	// Generate the JWT token if everything is correct
+	// Génération d'un token JWT
 	token, err := utils.GenerateToken(user.ID, user.Role.Name)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-		fmt.Println("Token generation error:", err)
+		utils.RespondError(c, http.StatusInternalServerError, "Failed to generate token", err.Error())
 		return
 	}
 
-	// Respond with success
-	c.JSON(http.StatusOK, gin.H{"token": token})
+	// Répondre avec succès
+	utils.RespondJSON(c, http.StatusOK, "Login successful", gin.H{"token": token})
 }

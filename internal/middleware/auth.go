@@ -2,63 +2,84 @@ package middleware
 
 import (
 	"archiv-system/internal/utils"
-	"fmt"
-	"github.com/gin-gonic/gin"
+	"log"
 	"net/http"
 	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
-// AuthMiddleware checks the JWT and validates permissions dynamically from the database
-func AuthMiddleware(requiredPermission string) gin.HandlerFunc {
+// JWTAuthMiddleware verifies the validity of the JWT and adds user information to the context
+func JWTAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-
-		// Extract the token from the Authorization header
-		authHeader := c.Request.Header.Get("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
+		// Get the token from the Authorization header
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"message": "Authorization header is missing"})
 			c.Abort()
 			return
 		}
 
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		claims, err := utils.ValidateToken(tokenStr)
+		// Split the token type (Bearer) and the token itself
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			c.JSON(http.StatusUnauthorized, gin.H{"message": "Invalid authorization format"})
+			c.Abort()
+			return
+		}
+
+		// Verify and parse the token
+		tokenString := parts[1]
+		claims, err := utils.ParseToken(tokenString)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			c.JSON(http.StatusUnauthorized, gin.H{"message": "Invalid or expired token", "error": err.Error()})
 			c.Abort()
 			return
 		}
 
-		// get user role from claims
-		role := claims.RoleName
-
-		// Dynamically load user role permissions
-		permissions, err := utils.LoadPermissions(role)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load permissions"})
+		// Check if the role is missing in the token
+		if claims.RoleName == "" {
+			c.JSON(http.StatusForbidden, gin.H{"message": "Role is missing in token"})
 			c.Abort()
 			return
 		}
 
-		// Check if the role has the required permission
-		if !hasPermission(permissions, requiredPermission) {
-			c.JSON(http.StatusForbidden, gin.H{"error": fmt.Sprintf("Permission '%s' required", requiredPermission)})
-			c.Abort()
-			return
-		}
+		// Add token information to the context
+		c.Set("userID", claims.UserID)
+		c.Set("roleName", claims.RoleName)
 
-		// Add user ID to context
-		c.Set("UserID", claims.UserID)
-		c.Set("Role", role)
+		// Log user information
+		log.Printf("User ID: %d, Role: %s", claims.UserID, claims.RoleName)
+
+		// Continue the request
 		c.Next()
 	}
 }
 
-// Helper pour vérifier si une permission est dans la liste
-func hasPermission(permissions []string, requiredPermission string) bool {
-	for _, perm := range permissions {
-		if perm == requiredPermission {
-			return true
+// AuthMiddleware verifies if the user has the required permission
+func AuthMiddleware(requiredPermission string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Retrieve token information from the context (set by JWTAuthMiddleware)
+		userID, exists := c.Get("userID")
+		roleName, existsRole := c.Get("roleName")
+		if !exists || !existsRole {
+			utils.RespondError(c, http.StatusInternalServerError, "User information is missing in context", nil)
+			c.Abort()
+			return
 		}
+
+		// Check if the user has the required permission
+		if !utils.HasPermission(roleName.(string), requiredPermission) {
+			utils.RespondError(c, http.StatusForbidden, "You don't have permission to access this resource", nil)
+			log.Printf("Permission denied: %s for user ID: %v, Role: %s", requiredPermission, userID, roleName)
+			c.Abort()
+			return
+		}
+
+		// Log permission check
+		log.Printf("Permission granted: %s for user ID: %v, Role: %s", requiredPermission, userID, roleName)
+
+		// Continue the request
+		c.Next()
 	}
-	return false
 }
